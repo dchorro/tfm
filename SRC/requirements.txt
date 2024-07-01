@@ -1,0 +1,7 @@
+torch==1.13.1
+torchvision
+pytorch_model_summary
+tqdm
+pybind11
+fastwer
+termcolor
