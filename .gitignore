@@ -1,3 +1,11 @@
+PerADani.tgz
+data/
+experiments/
+models/
+*.png
+*.out
+exp.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
