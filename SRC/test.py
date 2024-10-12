@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 # Standard packages
+import glob
 import segmentation_models_pytorch as smp
 import torch.nn.functional as F
 import sys, os, argparse
@@ -28,18 +29,53 @@ from UFSet import DisjointSet
 
 Image.MAX_IMAGE_PIXELS = None #to avoid decompression bomb DOS attack warning
 
+
+
+def downsample_proportionally_if_needed(tensor, max_height, max_width):
+    _, _, height, width = tensor.size()  # Assuming tensor shape is (N, C, H, W)
+
+    if height > max_height or width > max_width:
+        # Calculate the scaling factor while maintaining aspect ratio
+        scaling_factor = min(max_height / height, max_width / width)
+        new_height = int(height * scaling_factor)
+        new_width = int(width * scaling_factor)
+
+        # Downsample the tensor
+        tensor = nnf.interpolate(tensor, size=(new_height, new_width), mode='bilinear', align_corners=False, antialias=True)
+        
+    return tensor
+
+
+# Integration in your data preprocessing or data loading pipeline
+def process_batch(x, y, max_height, max_width):
+    # x = downsample_if_needed(x, max_height, max_width)
+    # y = downsample_if_needed(y, max_height, max_width)
+
+
+    x = downsample_proportionally_if_needed(x, max_height, max_width)
+    y = downsample_proportionally_if_needed(y, max_height, max_width)
+    return x, y
+
+
 # FUNCTION THAT EXECUTES JAVA -JAR TranskribusBaseLineEvaluationScheme for each folder and saves the result inside it
-def create_eval_file(subfolder):
+def create_eval_file(subfolder, gt):
+    print(subfolder)
     os.popen(f"ls {subfolder}/*.xml > hyp.lst")
-    os.popen(f"java -jar TranskribusBaseLineEvaluationScheme-0.1.3-jar-with-dependencies.jar gt.lst hyp.lst > {subfolder}/evaluation.txt").read()
+    os.popen(f"java -jar TranskribusBaseLineEvaluationScheme-0.1.3-jar-with-dependencies.jar {gt}.lst hyp.lst > {subfolder}/evaluation.txt").read()
+
+    # os.system(f"ls {subfolder}/*.xml > hyp.lst")
+    # os.system(f"java -jar TranskribusBaseLineEvaluationScheme-0.1.3-jar-with-dependencies.jar {gt}.lst hyp.lst > {subfolder}/evaluation.txt")
 
 
 def extract_and_write_lines(input_file, model_name):
     # Define the output file names
     
     # Open the input file and read its content
+    # try:
     with open(input_file, 'r') as file:
         lines = file.readlines()
+    # except:
+    #     return
     
     # Find the lines that need to be extracted
     p_line = None
@@ -61,14 +97,14 @@ def extract_and_write_lines(input_file, model_name):
         # print("ALL THREE LINES WERE FOUND!")
         # print("------------------------")
         # print()
-        with open("table_P.txt", 'a') as p_file:
-            p_file.write(f"{model_name:50}: {p_line}\n")
+        with open("table_P_cBat.txt", 'a') as p_file:
+            p_file.write(f"{model_name:120}: {p_line}\n")
         
-        with open("table_R.txt", 'a') as r_file:
-            r_file.write(f"{model_name:50}: {r_line}\n")
+        with open("table_R_cBat.txt", 'a') as r_file:
+            r_file.write(f"{model_name:120}: {r_line}\n")
         
-        with open("table_F1.txt", 'a') as f1_file:
-            f1_file.write(f"{model_name:50} {f1_line}\n")
+        with open("table_F1_cBat.txt", 'a') as f1_file:
+            f1_file.write(f"{model_name:120} {f1_line}\n")
     else:
         print("Error: Could not find all the required lines in the input file.")
 
@@ -123,16 +159,23 @@ def test(model, dataset_test, device, out_dir, batch_size=1, verbosity=False):
         terminal_cols = 80
             
     format='{l_bar}{bar:'+str(terminal_cols-48)+'}{r_bar}'
-        
+
     model.eval()
     test_loss = 0
-    with torch.no_grad():        
+    with torch.no_grad():
         for (x,y,bIdxs) in tqdm(test_loader, bar_format=format,dynamic_ncols=True, colour='magenta', desc='  Test'):
             #torch.cuda.empty_cache()
 
 
             x = x.to(device)
             y = y.to(device)
+            # print(x.shape)
+
+
+            # max_height = 832
+            # max_width = 832
+            # if (x.shape[-2] * x.shape[-1]) > (max_height*max_width):
+            #     x, y = process_batch(x, y, max_height, max_width)
 
             x, _ = pad_to_32(x)
             y, _ = pad_to_32(y)
@@ -172,7 +215,7 @@ def test(model, dataset_test, device, out_dir, batch_size=1, verbosity=False):
                
                 # HARD-CODED TO TEST FOLDER
                 # print(out_file_name)
-                get_lines(out, "data/test"+"/"+out_file_name, device, write_folder=out_dir)
+                get_lines(out, "data_cBat_17/test"+"/"+out_file_name, device, write_folder=out_dir)
         
         
         print(test_loss)
@@ -382,6 +425,9 @@ def normaliza_traza(baseline, num_points):
     return new_baseline
 
 
+
+
+
 def process_subfolders(parent_folder):
     # List all subfolders in the parent folder
     subfolders = [f.path for f in os.scandir(parent_folder) if f.is_dir()]
@@ -406,11 +452,45 @@ def process_subfolders(parent_folder):
                 # Break after processing one .pth file per subfolder
                 break
 
+
+
+def test_func(subfolder, device, batch_size, dataset_test):
+
+    for filename in os.listdir(subfolder):
+        if filename.endswith(".pth"):
+            # Construct the full file path
+            pth_file = os.path.join(subfolder, filename)
+            evaluation_file = os.path.join(subfolder, "evaluation.txt")
+            model_name = subfolder.split("/")[-1]
+            print(subfolder)
+            with torch.no_grad():
+                torch.cuda.empty_cache()
+                state = torch.load(pth_file, map_location=device)
+                model = state['model']
+            
+                test(model, dataset_test, device, batch_size=batch_size, out_dir=subfolder)
+
+
+
+            # creates eval .xml files
+            create_eval_file(subfolder, "gt_cbat")
+
+            # # create 3 unique tables (f1, p, r) from eval files
+            extract_and_write_lines(evaluation_file, model_name)
+            
+            # print(len(res))
+            # print(res[-90:])
+            # print()
+            # print(res)
+                
+            # Break after processing one .pth file per subfolder
+            break
+
             
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run a model training process of using the given dataset.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument('--batch_size', type=int, help='image batch_size', default=24)
+    parser.add_argument('--batch_size', type=int, help='image batch_size', default=1)
     parser.add_argument('--gpu', type=int, default=0, help='used gpu')    
 
     parser.add_argument("--verbosity", action="store_true",  help="output verbosity",default=False)
@@ -449,18 +529,40 @@ if __name__ == "__main__":
 #    img_transforms = procImg.get_tranform( line_height)
 
 
-    dataset_test = Dataset(args.dataset_test, 400)
+    train_xy_transforms = T.Compose([
+        # T.Grayscale(num_output_channels=3),
+        T.ToTensor(),
+        T.Resize((768, 768), interpolation=T.InterpolationMode.BILINEAR, antialias=True),
+        # T.RandomInvert(p=1.0)
+        ])
+    train_x_transforms = T.Compose([
+        T.RandomInvert(p=1.0),
+        # T.GaussianBlur(3),
+        # T.ColorJitter(),
+    ])
+    # dataset_test = Dataset(args.dataset_test, 400)
+    dataset_test = Dataset(args.dataset_test, 400, xy_transform=train_xy_transforms, x_transform=train_x_transforms)
 #                                 transform=img_transforms)
 
 
-    start_time=time.time()
+    start_time = time.time()
 
     # test(model, dataset_test, device, batch_size=args.batch_size, out_dir=args.out_dir, verbosity=args.verbosity)
 
     parent_folder = args.parent_folder
-    subfolders = [f.path for f in os.scandir(parent_folder) if f.is_dir()]
+    subfolders = [args.parent_folder]
+    # subfolders = [file for file in glob.glob(f"{parent_folder}/2024-07-19*")]
+    # subfolders2 = ["experiments/2024-07-20_12-34_unetpp_se_resnet50_imagenet_data_cBat_17_frozen_attention_5e-05_100",
+    # "experiments/2024-07-20_21-52_unetpp_se_resnet50_imagenet_data_cBat_17_frozen_attention_5e-05_100"]
+    # subfolders = subfolders + subfolders2
+    
+    # subfolders = [os.path.join(parent_folder, folder) for folder in os.listdir(parent_folder) if os.path.isdir(os.path.join(parent_folder, folder)) and "_cBat_" not in folder]
+    
+    # print(len(subfolders))
+    # for fold in subfolders:
+    #     print(fold)
 
-    # print(subfolders)
+
 
     # subfolder = "experiments/2024-06-25_18-50_unetpp_mobileone_s4_imagenet/"
     # filename = "model_47.pth"
@@ -476,54 +578,55 @@ if __name__ == "__main__":
     #     test(model, dataset_test, device, batch_size=args.batch_size, out_dir=subfolder, verbosity=args.verbosity)
 
     # print(subfolders)
+    
+    
+    
     a = "Model_Name"
     output_files = {
-                    "table_P.txt": f"{a:50} P Value\n",
-                    "table_R.txt": f"{a:50} R Value\n",
-                    "table_F1.txt": f"{a:50} F1 Value\n"
+                    "table_P_cBat.txt": f"{a:120} P Value\n",
+                    "table_R_cBat.txt": f"{a:120} R Value\n",
+                    "table_F1_cBat.txt": f"{a:120} F1 Value\n"
                 }
 
+    
+    # If file does not exists write headers, else do nothing.
     for file_name, header in output_files.items():
-        with open(file_name, 'w') as file:
-            file.write(header)
-
-    for _, subfolder in enumerate(subfolders[:]):
-        # Look for .pth files in the current subfolder
+        if not os.path.exists(file_name):
+            with open(file_name, 'w') as file:
+                file.write(header)
+            
+    
+    # subfolder = args.parent_folder
+    
+    for subfolder in subfolders:  
+    # Look for .pth files in the current subfolder
+        # print(subfolder)
         for filename in os.listdir(subfolder):
             if filename.endswith(".pth"):
                 # Construct the full file path
                 pth_file = os.path.join(subfolder, filename)
+                print(pth_file)
                 evaluation_file = os.path.join(subfolder, "evaluation.txt")
-
-                model_name = "_".join(subfolder.split("_")[2:])
-
-                
-                # create_eval_file(subfolder)
-
-
-                extract_and_write_lines(evaluation_file, model_name)
-                
-                # print(len(res))
-                # print(res[-90:])
-                # print()
-                # print(res)
-
-
+                model_name = subfolder.split("/")[-1]
+                print(subfolder.split("/"))
+                print(f"\n{model_name=}")
                 
                 # with torch.no_grad():
-                    
                 #     torch.cuda.empty_cache()
                 #     state = torch.load(pth_file, map_location=device)
                 #     model = state['model']
-                
-                #     # Execute the function foo and get the result
+                #     # print(dataset_test, device, args.batch_size, subfolder)
                 #     test(model, dataset_test, device, batch_size=args.batch_size, out_dir=subfolder, verbosity=args.verbosity)
 
-                    # Save the result in the same subfolder
-                    # with open(os.path.join(subfolder, "result.txt"), 'w') as f:
-                    #     f.write(result)
+                # creates eval .xml files
+                create_eval_file(subfolder, "gt_cbat")
+
+                # create 3 unique tables (f1, p, r) from eval files
+                extract_and_write_lines(evaluation_file, model_name)
+
                 # Break after processing one .pth file per subfolder
                 break
+    
 
 
 
